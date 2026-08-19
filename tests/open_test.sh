@@ -73,6 +73,9 @@ printf 'picker_placement = "popup"\npopup_width = "80%%"\npopup_height = 24\n' \
 args=$(open_args picker-default)
 assert_opens_with '--width 80% --height 24' "$args"
 
+args=$(open_args picker-with-remotes)
+assert_opens_with '--entrypoint picker-with-remotes' "$args"
+
 printf 'picker_placement = "popup"\npopup_width = "wide"\n' > "$config_dir/config.toml"
 args=$(open_args picker-default)
 assert_opens_with '--placement popup' "$args"

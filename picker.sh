@@ -7,7 +7,7 @@
 create_base=""
 create_base_label="default branch"
 case ${1:-} in
-  ""|--create-base=default)
+  ""|--create-base=default|--show-with-remotes)
     ;;
   --create-base=current)
     create_base="@"
@@ -36,9 +36,11 @@ source "$plugin_root/config.sh"
 source "$plugin_root/helpers.sh"
 
 # Branch refs to offer alongside `wt list`: always local heads, plus
-# remote-tracking branches unless disabled via show_remote_branches = false.
-branch_refs=(refs/heads refs/remotes)
-[[ $(worktrunk_show_remote_branches) == false ]] && branch_refs=(refs/heads)
+# remote-tracking branches when requested by this dedicated picker or config.
+branch_refs=(refs/heads)
+if [[ ${1:-} == --show-with-remotes || $(worktrunk_show_remote_branches) == true ]]; then
+  branch_refs+=(refs/remotes)
+fi
 
 worktrunk_fzf_layout
 

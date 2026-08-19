@@ -22,7 +22,7 @@ resulting worktree opens as a tab or as a native linked-worktree workspace.
 
 ## What it does
 
-Three workspace actions:
+Four workspace actions:
 
 - **Worktree: switch / create from default branch** — opens an fzf picker over
   your existing worktrees and local branches without worktrees (remote-tracking
@@ -34,7 +34,10 @@ Three workspace actions:
   new branch names are created with `wt switch --create --base @`, i.e. from the
   currently checked-out branch/worktree.
 
-Both create actions support [worktrunk syntax for PR/MR along with other shortcuts](https://worktrunk.dev/switch/#shortcuts).
+- **Worktree: switch / create from local or remote branches** — the default-base
+  picker with remote-tracking branches included for this invocation.
+
+The pickers support [worktrunk syntax for PR/MR along with other shortcuts](https://worktrunk.dev/switch/#shortcuts).
 Worktrunk's lifecycle hooks run in either presentation mode, and the checkout
 opens as a tab or a native worktree workspace according to plugin configuration.
 
@@ -141,16 +144,25 @@ herdr plugin link /path/to/herdr-worktrunk
 ## Usage
 
 ### Create/Switch a worktree from the default branch
+
 ```
 herdr plugin action invoke open --plugin worktrunk
 ```
 
 ### Create/Switch a worktree from the current branch
+
 ```
 herdr plugin action invoke open-current --plugin worktrunk
 ```
 
+### Create/Switch a worktree from local or remote branches
+
+```
+herdr plugin action invoke open-with-remotes --plugin worktrunk
+```
+
 ### Remove Worktree
+
 ```
 herdr plugin action invoke remove --plugin worktrunk
 ```
@@ -178,6 +190,13 @@ type = "plugin_action"
 command = "worktrunk.open-current"
 description = "Worktree: switch / create from current branch"
 
+# Optional: include remote-tracking branches for this picker.
+[[keys.command]]
+key = "prefix+shift+r"
+type = "plugin_action"
+command = "worktrunk.open-with-remotes"
+description = "Worktree: switch / create from local or remote branches"
+
 [[keys.command]]
 key = "prefix+shift+d"
 type = "plugin_action"
@@ -189,7 +208,8 @@ description = "Worktree: remove"
 binds `prefix+shift+g` to "new worktree" by default, and a custom keybinding takes
 precedence over the built-in on the same key — so mapping `worktrunk.open`
 to `prefix+shift+g` replaces it with worktrunk's switch/create picker, hooks
-included. Pick matching keys for `worktrunk.open-current` and `worktrunk.remove`
+included. Pick matching keys for `worktrunk.open-current`,
+`worktrunk.open-with-remotes`, and `worktrunk.remove`
 to round out the workflow.
 
 Reload the config after editing it:

@@ -4,7 +4,6 @@ version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "Switch, create, or remove git worktrees via worktrunk"
 platforms = ["macos", "linux"]
-
 # Workspace actions: open.sh resolves the workspace's repo and the configured
 # picker placement, then opens the entrypoint named here.
 [[actions]]
@@ -18,6 +17,12 @@ id = "open-current"
 title = "Worktree: switch / create from current branch"
 contexts = ["workspace"]
 command = ["bash", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/open.sh\" picker-current"]
+
+[[actions]]
+id = "open-with-remotes"
+title = "Worktree: switch / create from local or remote branches"
+contexts = ["workspace"]
+command = ["bash", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/open.sh\" picker-with-remotes"]
 
 [[actions]]
 id = "remove"
@@ -38,6 +43,12 @@ id = "picker-current"
 title = "Worktrunk — current branch"
 placement = "split"
 command = ["bash", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/picker.sh\" --create-base=current"]
+
+[[panes]]
+id = "picker-with-remotes"
+title = "Worktrunk — local and remote branches"
+placement = "split"
+command = ["bash", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/picker.sh\" --show-with-remotes"]
 
 [[panes]]
 id = "remover"
