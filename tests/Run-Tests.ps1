@@ -142,7 +142,7 @@ open_mode = "workspace" # last value wins
         $openLog = [System.IO.File]::ReadAllText($stubLog)
         Assert-Contains 'plugin pane open' $openLog 'Herdr open arguments'
         Assert-Contains '--entrypoint picker-default' $openLog 'Herdr open arguments'
-        Assert-Contains '--env WORKTRUNK_REPO_CWD=C:\Projects\Repo Here' $openLog 'Herdr open arguments'
+        Assert-Contains '--env "WORKTRUNK_REPO_CWD=C:\Projects\Repo Here"' $openLog 'Herdr open arguments'
         Assert-Contains '--placement split --direction down' $openLog 'Herdr open arguments'
 
         # Native-command integration smoke tests for picker, merge, and remove.
