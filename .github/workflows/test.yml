@@ -1,0 +1,18 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  powershell:
+    name: Windows PowerShell 5.1
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run PowerShell tests
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1

@@ -1,304 +1,224 @@
-# Worktrunk
+# Worktrunk for Windows
 
-A [herdr](https://herdr.dev) plugin for switching, creating, merging, and
-removing git worktrees through [worktrunk](https://github.com/max-sixty/worktrunk). Pick (or
-type) a branch in an fzf picker and open the worktree as a herdr tab or a native
-worktree workspace — with worktrunk's hooks running along the way.
+A Windows-only [Herdr](https://herdr.dev) plugin for switching, creating,
+merging, and removing Git worktrees through
+[Worktrunk](https://worktrunk.dev). It is a native Windows PowerShell port of
+[`devashish2203/herdr-worktrunk`](https://github.com/devashish2203/herdr-worktrunk).
 
-## Why this plugin
+The plugin uses Worktrunk for worktree lifecycle hooks and Herdr for native
+worktree workspaces or tabs. It does not require Bash, WSL, `jq`, `sed`, or
+`awk`.
 
-herdr already ships with its own worktree management (`herdr worktree
-create/open/remove/list`), and it works fine. But worktrunk is a dedicated
-worktree manager that does more — most importantly, **lifecycle hooks**: run
-setup when a worktree is created (install deps, copy `.env` files, bootstrap
-services) and teardown when it's removed, with template variables like
-`{{ branch }}` and `{{ worktree_path }}`. herdr's built-in worktree commands
-have no hook system.
+## Status
 
-Rather than reimplement hooks inside herdr, this plugin wires worktrunk's `wt`
-into herdr: you get worktrunk's hook-driven workflow (plus its niceties — base
-branch selection, PR shortcuts, live preview) while choosing whether the
-resulting worktree opens as a tab or as a native linked-worktree workspace.
-
-## What it does
-
-Six workspace actions:
-
-- **Worktree: switch / create from default branch** — opens an fzf picker over
-  your existing worktrees and local branches without worktrees (remote-tracking
-  branches too, if enabled — see [Remote branches in the picker](#remote-branches-in-the-picker)).
-  Press `Enter` on a match to switch to it, or type a new name and press `Enter`
-  to create it from worktrunk's default base branch. When the name you want
-  fuzzy-matches an existing branch (e.g. you want `pgx` but `pgx-bump` exists),
-  press `Alt+Enter` to force the typed name instead of the highlighted match.
-
-- **Worktree: switch / create from current branch** — the same picker, but typed
-  new branch names are created with `wt switch --create --base @`, i.e. from the
-  currently checked-out branch/worktree.
-
-- **Worktree: switch / create from local or remote branches** — the default-base
-  picker with remote-tracking branches included for this invocation.
-
-The pickers support [worktrunk syntax for PR/MR along with other shortcuts](https://worktrunk.dev/switch/#shortcuts).
-Worktrunk's lifecycle hooks run in either presentation mode, and the checkout
-opens as a tab or a native worktree workspace according to plugin configuration.
-
-- **Worktree: remove** — opens an fzf picker over removable worktrees
-  (everything except the main checkout). Pick one; worktrunk prompts for
-  confirmation and gates unmerged branches / untracked files itself, then
-  removes it. The native workspace or any legacy tab panes associated with the
-  deleted worktree are closed automatically.
-
-- **Worktree: merge into the target branch** — the same picker over removable
-  worktrees, then `wt merge` on the one you pick, then removal. The native
-  workspace or legacy tab panes are closed once the worktree is gone.
-
-- **Worktree: merge into the target branch, keeping every commit** — the same
-  merge with `--no-squash`. See [Merge flags](#merge-flags) for the rest.
-
-## Worktree presentation
-
-By default the plugin organizes worktrees the same way as herdr's built-in
-worktree support: each checkout becomes a nested worktree workspace in the
-sidebar. To restore the original tab-based behavior, set `open_mode` to `"tab"`
-in the plugin's managed configuration directory:
-
-```bash
-config_dir=$(herdr plugin config-dir worktrunk)
-mkdir -p "$config_dir"
-${EDITOR:-vi} "$config_dir/config.toml"
-```
-
-```toml
-open_mode = "tab"
-```
-
-Supported values:
-
-- `open_mode = "workspace"` — let Worktrunk create or switch the checkout and
-  run its hooks, then register that checkout with `herdr worktree open`. Herdr
-  displays it as a nested worktree workspace in the sidebar. This is the default.
-- `open_mode = "tab"` — open a new tab in the current workspace and run `wt` in
-  that tab's shell. This preserves the original plugin behavior; see
-  [Tab mode and your shell](#tab-mode-and-your-shell).
-
-The config file is read each time the picker runs, so changing the mode does
-not require reinstalling or reloading the plugin.
-
-### Tab mode and your shell
-
-In tab mode the plugin can't run `wt` itself: the new tab has to end up *inside*
-the worktree, and only the shell running in that tab can change its own
-directory. So the picker types a `wt switch …` line into the tab's interactive
-shell, written in that shell's own syntax, followed by a small relabel step
-(`tab-relabel.sh`) that renames the tab after the branch the switch resolved to.
-The plugin asks herdr which shell the tab runs and supports bash, zsh, fish, and
-nushell; any other shell gets the POSIX form.
-
-This needs worktrunk's shell integration installed for that shell — run
-`wt config shell install` and restart the shell — because it is the
-integration's `wt` command that moves the shell into the worktree. Without it
-the worktree is still created, but the tab stays where it was; the plugin says
-so in the tab and leaves it labeled with the name you picked.
-
-Workspace mode (the default) calls `wt` directly and needs none of this.
-
-## Remote branches in the picker
-
-By default the picker lists only your worktrees and local branches. To also
-offer remote-tracking branches (e.g. `origin/foo`; run `git fetch` yourself to
-refresh these), set `show_remote_branches` to `true` in the same `config.toml`:
-
-```toml
-show_remote_branches = true
-```
-
-Local branches without worktrees always appear regardless of this setting.
-
-## Merge flags
-
-The merge actions pass no flags to `wt merge` beyond the variant's `--no-squash`.
-To change what every merge does, list flags in `merge_flags` in the same
-`config.toml`:
-
-```toml
-merge_flags = "--no-squash --no-rebase"
-```
-
-Accepted: `--no-squash`, `--no-rebase`, `--no-ff`, `--no-commit`, `--no-hooks`,
-`--stage=all|tracked|none` (see `wt merge --help`).
-
-A merge that fails leaves the worktree and its workspace alone, with worktrunk's
-output on screen.
-
-## Picker presentation
-
-The picker opens in a split pane below the workspace. To open it as a
-session-modal popup over the current layout instead, set `picker_placement` in
-the same `config.toml`:
-
-```toml
-picker_placement = "popup"
-```
-
-Supported values:
-
-- `picker_placement = "split"` — a pane split below the workspace, closed when
-  the picker exits. This is the default.
-- `picker_placement = "popup"` — a floating terminal centered over the tab,
-  leaving the tiled layout alone. Needs herdr ≥ 0.7.4.
-
-A popup is half the window by default. Size it with `popup_width` and
-`popup_height`, either as terminal cells or as a percentage of the window:
-
-```toml
-picker_placement = "popup"
-popup_width = "70%"
-popup_height = 24
-```
-
-In a split the picker draws its own rounded border and inset margin, which a
-popup does not need, so the list fills the popup frame herdr already draws.
+This fork is under active development. Its automated tests run in native
+Windows PowerShell 5.1, but releases should also receive a manual smoke test in
+Herdr on Windows before being considered stable.
 
 ## Requirements
 
-- [**herdr**](https://herdr.dev) ≥ 0.7.0
-- [**worktrunk**](https://github.com/max-sixty/worktrunk) ≥ 0.60.0 — the `wt` CLI on your `PATH`
-- **fzf** — the interactive picker
-- **jq** — JSON parsing
-- **bash** — the scripts run with `/bin/bash`
+- Windows 10 or newer
+- [Herdr](https://herdr.dev) 0.8.0 or newer
+- [Git for Windows](https://git-scm.com/download/win)
+- [Worktrunk](https://worktrunk.dev) 0.60.0 or newer, installed as `git-wt`
+- [fzf](https://github.com/junegunn/fzf)
+- Windows PowerShell 5.1 or newer
 
-Platforms: macOS and Linux.
+Install the command-line dependencies with Winget:
+
+```powershell
+winget install Git.Git
+winget install max-sixty.worktrunk
+winget install junegunn.fzf
+```
+
+Worktrunk is deliberately invoked as `git-wt`, not `wt`: Windows Terminal owns
+an unrelated `wt.exe` application alias.
 
 ## Installation
 
-From the herdr CLI:
+For local development:
 
-```bash
-herdr plugin install devashish2203/herdr-worktrunk
+```powershell
+git clone --branch windows-powershell --single-branch https://github.com/giard-alexandre/herdr-worktrunk-windows.git
+Set-Location herdr-worktrunk-windows
+herdr plugin link $PWD
 ```
 
-Or, for local development, clone and link:
+Install directly from GitHub (the branch is required; default `main` is the Bash plugin):
 
-```bash
-git clone https://github.com/devashish2203/herdr-worktrunk
-herdr plugin link /path/to/herdr-worktrunk
+```powershell
+herdr plugin install giard-alexandre/herdr-worktrunk-windows --ref windows-powershell
 ```
 
-## Usage
+The plugin ID is `worktrunk.windows`.
 
-### Create/Switch a worktree from the default branch
+## Actions
 
-```
-herdr plugin action invoke open --plugin worktrunk
-```
+- `worktrunk.windows.open` — switch or create from Worktrunk's default branch
+- `worktrunk.windows.open-current` — switch or create from the current branch
+- `worktrunk.windows.open-with-remotes` — include remote-tracking branches
+- `worktrunk.windows.remove` — remove a non-main worktree
+- `worktrunk.windows.merge` — merge and remove a worktree
+- `worktrunk.windows.merge-no-squash` — merge without squashing, then remove
 
-### Create/Switch a worktree from the current branch
-
-```
-herdr plugin action invoke open-current --plugin worktrunk
-```
-
-### Create/Switch a worktree from local or remote branches
-
-```
-herdr plugin action invoke open-with-remotes --plugin worktrunk
-```
-
-### Remove Worktree
-
-```
-herdr plugin action invoke remove --plugin worktrunk
-```
-
-## Keybindings
-
-To drive the plugin from the keyboard, add `[[keys.command]]` entries to
-`~/.config/herdr/config.toml` with `type = "plugin_action"`. The `command` is the
-plugin's action id qualified with the plugin id (`worktrunk.<action>`; run
-`herdr plugin action list` to see the ids):
+Example keybindings in the Herdr config:
 
 ```toml
-# Override herdr's built-in "new worktree" key (prefix+shift+g) with worktrunk's
-# default-branch switch/create picker:
 [[keys.command]]
 key = "prefix+shift+g"
 type = "plugin_action"
-command = "worktrunk.open"
-description = "Worktree: switch / create from default branch"
-
-# Optional: bind current-branch creation separately.
-[[keys.command]]
-key = "prefix+shift+c"
-type = "plugin_action"
-command = "worktrunk.open-current"
-description = "Worktree: switch / create from current branch"
-
-# Optional: include remote-tracking branches for this picker.
-[[keys.command]]
-key = "prefix+shift+r"
-type = "plugin_action"
-command = "worktrunk.open-with-remotes"
-description = "Worktree: switch / create from local or remote branches"
+command = "worktrunk.windows.open"
+description = "Worktree: switch / create"
 
 [[keys.command]]
 key = "prefix+shift+d"
 type = "plugin_action"
-command = "worktrunk.remove"
+command = "worktrunk.windows.remove"
 description = "Worktree: remove"
 
 [[keys.command]]
 key = "prefix+shift+m"
 type = "plugin_action"
-command = "worktrunk.merge"
-description = "Worktree: merge into the target branch"
+command = "worktrunk.windows.merge"
+description = "Worktree: merge"
 ```
 
-**Recommended:** override herdr's built-in worktree management with these. herdr
-binds `prefix+shift+g` to "new worktree" by default, and a custom keybinding takes
-precedence over the built-in on the same key — so mapping `worktrunk.open`
-to `prefix+shift+g` replaces it with worktrunk's switch/create picker, hooks
-included. Pick matching keys for `worktrunk.open-current`,
-`worktrunk.open-with-remotes`, `worktrunk.remove`, `worktrunk.merge`, and
-`worktrunk.merge-no-squash` to round out the workflow.
+Reload Herdr after editing its configuration:
 
-Reload the config after editing it:
-
-```bash
+```powershell
 herdr server reload-config
 ```
 
-## Development
+## Configuration
 
-The plugin is a manifest plus small bash scripts:
+Find the plugin-managed configuration directory and create `config.toml`:
 
-- `herdr-plugin.toml` — actions and panes
-- `config.sh` — worktree and picker presentation configuration
-- `helpers.sh` — shared shell helpers (e.g. worktrunk shortcut detection)
-- `open.sh` — the action entrypoint that opens a picker in its configured placement
-- `picker.sh` — the switch / create picker
-- `tab-relabel.sh` — the relabel step tab mode types into the new tab after `wt switch`
-- `remove.sh` — the remove picker
-- `merge.sh` — the merge picker
-- `lifecycle.sh` — shared steps for the actions that destroy a worktree:
-  candidate listing, herdr workspace resolution, post-removal UI cleanup
-- `tests/config_test.sh` — configuration parser checks
-- `tests/helpers_test.sh` — helper function checks
-- `tests/lifecycle_test.sh` — candidate/workspace resolution and cleanup checks
-- `tests/merge_test.sh` — merge argument and failure-path checks
-- `tests/open_test.sh` — picker placement / open argument checks
-- `tests/picker_test.sh` — switch / create picker checks in both open modes
-- `tests/tab_relabel_test.sh` — tab relabel checks
-
-herdr caches the manifest when a plugin is linked, so after editing
-`herdr-plugin.toml` you must relink for changes to take effect:
-
-```bash
-herdr plugin unlink worktrunk && herdr plugin link "$PWD"
+```powershell
+$configDir = herdr plugin config-dir worktrunk.windows
+New-Item -ItemType Directory -Force $configDir | Out-Null
+notepad (Join-Path $configDir 'config.toml')
 ```
 
-Edits to the bash scripts are picked up on the next run — no relink needed.
+Example configuration:
+
+```toml
+open_mode = "workspace"
+show_remote_branches = false
+picker_placement = "popup"
+popup_width = "70%"
+popup_height = 24
+merge_flags = "--no-squash --no-rebase"
+```
+
+### Worktree presentation
+
+- `open_mode = "workspace"` is the default. Worktrunk creates or switches the
+  checkout, then the plugin registers it with `herdr worktree open`.
+- `open_mode = "tab"` opens a Herdr tab and sends the switch command to that
+  tab's interactive PowerShell or Nushell session.
+
+Tab mode requires Worktrunk's shell integration:
+
+```powershell
+git-wt config shell install
+```
+
+Restart the shell after installation. PowerShell and Nushell are supported for
+tab mode; `cmd.exe` is not. Workspace mode does not require shell integration.
+
+### Remote branches
+
+Set:
+
+```toml
+show_remote_branches = true
+```
+
+The dedicated `open-with-remotes` action enables them for one invocation
+regardless of this setting. Run `git fetch` yourself when you want refreshed
+remote refs.
+
+### Picker placement
+
+- `picker_placement = "split"` opens below the current pane and is the default.
+- `picker_placement = "popup"` opens a session-modal popup.
+
+Popup dimensions accept terminal cells or percentages:
+
+```toml
+popup_width = "80%"
+popup_height = 24
+```
+
+### Merge flags
+
+Supported values are:
+
+- `--no-squash`
+- `--no-rebase`
+- `--no-ff`
+- `--no-commit`
+- `--no-hooks`
+- `--stage=all|tracked|none`
+
+Selecting removal immediately runs Worktrunk removal; the plugin does not ask
+for confirmation. Worktrunk's unmerged/untracked-file protections still apply.
+
+## PowerShell execution policy
+
+Every manifest command requests a process-scoped execution-policy bypass:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...
+```
+
+This does not modify the user's configured policy. A centrally enforced
+`MachinePolicy` or `UserPolicy` can still prohibit scripts. Check with:
+
+```powershell
+Get-ExecutionPolicy -List
+```
+
+Machines whose administrators prohibit PowerShell scripts cannot run this
+PowerShell-based fork.
+
+## Development
+
+The implementation is organized as:
+
+- `scripts/Worktrunk.Common.ps1` — configuration, JSON normalization, path,
+  picker, shell-command, and lifecycle helpers
+- `scripts/Open.ps1` — action-to-pane bridge
+- `scripts/Picker.ps1` — switch/create flow
+- `scripts/Remove.ps1` — removal flow
+- `scripts/Merge.ps1` — merge/removal flow
+- `scripts/TabRelabel.ps1` — tab-mode post-switch relabeling
+- `tests/Run-Tests.ps1` — dependency-free PowerShell behavior and parser tests
+
+Run tests in native Windows PowerShell:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
+```
+
+To verify generated Nushell commands against the real Worktrunk integration,
+provide a v0.60 binary and its exact upstream `git-wt.nu` script (requires `nu`):
+
+```powershell
+powershell.exe -NoProfile -File tests\Test-NushellIntegration.ps1 -WorktrunkBinary C:\Tools\git-wt.exe -IntegrationScript C:\Tools\git-wt.nu
+```
+
+This checks successful switching and failed switching with absent and stale
+Nushell exit-status variables. Only the final relabel executable is mocked.
+
+When editing `herdr-plugin.toml`, relink the plugin:
+
+```powershell
+herdr plugin unlink worktrunk.windows
+herdr plugin link $PWD
+```
 
 ## License
 
-[MIT](LICENSE.md) © Devashish Chandra
+[MIT](LICENSE.md) © Devashish Chandra and contributors
