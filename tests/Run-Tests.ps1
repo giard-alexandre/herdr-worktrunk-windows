@@ -120,8 +120,63 @@ open_mode = "workspace" # last value wins
     $nuLine = Get-TabSwitchCommand 'nu.exe' 'C:\Plugin Files\TabRelabel.ps1' 'C:\Herdr\herdr.exe' `
         'w1V:t3' "feat'ure" 'C:\Repo Here' @('switch', '--create', "feat'ure")
     Assert-Contains 'print -n (git-wt' $nuLine 'Nushell tab command'
-    Assert-Contains 'if ($env.LAST_EXIT_CODE == 0)' $nuLine 'Nushell relabel success gate'
+    Assert-False ($nuLine.Contains('LAST_EXIT_CODE')) 'Nushell does not consult stale status'
+    Assert-Contains '); powershell.exe' $nuLine 'Nushell failure-propagating chain'
     Assert-Contains 'powershell.exe -NoProfile' $nuLine 'Nushell relabel command'
+
+    # Portable behavior checks complement (not replace) native .cmd coverage.
+    & {
+        function fzf {
+            process { }
+            end { $global:LASTEXITCODE = $script:FzfStatus; 'query' }
+        }
+        foreach ($status in @(0, 1, 130, 2, 127)) {
+            $script:FzfStatus = $status
+            $threw = $false
+            $selection = $null
+            try { $selection = Select-WorktrunkBranch @('main') 'test' 'test' -AllowQuery }
+            catch { $threw = $true }
+            if ($status -eq 130) { Assert-Equal $null $selection 'fzf cancellation ignores output' }
+            elseif ($status -le 1) { Assert-Equal 'query' $selection "fzf query at status $status" }
+            else { Assert-True $threw "fzf status $status throws" }
+        }
+        $script:FzfStatus = 1
+        $threw = $false
+        try { Select-WorktrunkBranch @('main') 'test' 'test' } catch { $threw = $true }
+        Assert-True $threw 'no-match without query is not cancellation'
+
+        # Path containment itself is covered with Windows paths below; isolate
+        # exit handling here from the host platform's GetFullPath semantics.
+        function Test-WindowsPathWithin { param($Candidate, $Root) return $true }
+        function Test-HerdrCleanup {
+            if ($args[0] -eq 'workspace') { $global:LASTEXITCODE = 9; return }
+            if ($args[1] -eq 'list') {
+                $global:LASTEXITCODE = $script:ListStatus
+                '{"result":{"panes":[{"pane_id":"other","cwd":"/tmp/worktree/src"}]}}'
+                return
+            }
+            $global:LASTEXITCODE = 8
+        }
+        $savedHerdr = $env:HERDR_BIN_PATH
+        $savedPane = $env:HERDR_PANE_ID
+        try {
+            $env:HERDR_BIN_PATH = 'Test-HerdrCleanup'
+            $env:HERDR_PANE_ID = 'self'
+            foreach ($kind in @('workspace', 'list', 'pane')) {
+                $script:ListStatus = 0
+                if ($kind -eq 'list') { $script:ListStatus = 7 }
+                $workspace = $null
+                if ($kind -eq 'workspace') { $workspace = 'ws' }
+                $message = ''
+                try { Close-WorktrunkUi $workspace '/tmp/worktree' } catch { $message = $_.Exception.Message }
+                Assert-Contains 'Worktree removed, but' $message "$kind partial-success error"
+                Assert-Contains 'exit code' $message "$kind exit code reported"
+            }
+        } finally {
+            $env:HERDR_BIN_PATH = $savedHerdr
+            $env:HERDR_PANE_ID = $savedPane
+        }
+    }
 
     if ($IsNativeWindows) {
         # Verify Open.ps1 builds an argv-based split request and forwards the repository
@@ -179,6 +234,9 @@ if "%1 %2"=="pane list" echo %HERDR_PANE_LIST_JSON%
 if "%1 %2"=="tab create" echo %HERDR_TAB_CREATE_JSON%
 if "%1 %2"=="pane process-info" echo {"result":{"process_info":{"shell_pid":42,"foreground_processes":[{"pid":42,"name":"%HERDR_STUB_SHELL%"}]}}}
 if "%1 %2"=="pane run" exit /b %HERDR_PANE_RUN_STATUS%
+if "%1 %2"=="workspace close" exit /b %HERDR_CLOSE_STATUS%
+if "%1 %2"=="pane close" exit /b %HERDR_CLOSE_STATUS%
+if "%1 %2"=="pane list" exit /b %HERDR_PANE_LIST_STATUS%
 exit /b 0
 '@ | Set-Content -LiteralPath $herdrStub -Encoding ASCII
 
@@ -196,6 +254,8 @@ exit /b 0
         $env:HERDR_STUB_SHELL = 'powershell.exe'
         $env:HERDR_TAB_CREATE_JSON = '{"result":{"tab":{"tab_id":"w1V:t3"},"root_pane":{"pane_id":"w1V:p5"}}}'
         $env:HERDR_PANE_RUN_STATUS = '0'
+        $env:HERDR_CLOSE_STATUS = '0'
+        $env:HERDR_PANE_LIST_STATUS = '0'
         $env:WORKTRUNK_REPO_CWD = $repo
         $env:HERDR_WORKSPACE_ID = 'w1'
         'open_mode = "workspace"' | Set-Content -LiteralPath (Join-Path $configDir 'config.toml') -Encoding ASCII
@@ -276,6 +336,21 @@ exit /b 0
         Assert-Contains 'remove --foreground feature' $wtCalls 'Worktrunk remove arguments'
         Assert-Contains 'workspace close ws-feature' $herdrCalls 'Herdr remove cleanup'
 
+        'merge_flags = "--no-hooks --no-rebase"' | Set-Content -LiteralPath (Join-Path $configDir 'config.toml') -Encoding ASCII
+        Remove-Item -LiteralPath $wtLog -ErrorAction SilentlyContinue
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\Merge.ps1')
+        Assert-Equal 0 $LASTEXITCODE 'no-hooks merge status'
+        $wtCalls = [System.IO.File]::ReadAllText($wtLog)
+        Assert-Contains 'remove --foreground feature --no-hooks' $wtCalls 'no-hooks forwarded to removal'
+        Assert-False ($wtCalls.Contains('remove --foreground feature --no-hooks --no-rebase')) 'merge-only flags not forwarded'
+
+        $env:HERDR_CLOSE_STATUS = '9'
+        $failure = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\Remove.ps1')) -join "`n"
+        Assert-Equal 1 $LASTEXITCODE 'workspace cleanup failure status'
+        Assert-Contains 'Worktree removed, but' $failure 'partial-success diagnostic'
+        Assert-Contains 'exit code 9' $failure 'workspace native error'
+        $env:HERDR_CLOSE_STATUS = '0'
+
         # Failure paths must preserve the worktree UI and must not advance from a
         # failed merge to removal.
         $env:WORKTRUNK_NONINTERACTIVE = '1'
@@ -334,6 +409,46 @@ exit /b 0
         Assert-False ($herdrCalls.Contains('pane close p-self')) 'legacy cleanup remove keeps caller'
         Assert-False ($herdrCalls.Contains('pane close p-sibling')) 'legacy cleanup remove keeps sibling'
 
+        foreach ($failureKind in @('close', 'list', 'json')) {
+            $savedPaneJson = $env:HERDR_PANE_LIST_JSON
+            if ($failureKind -eq 'close') { $env:HERDR_CLOSE_STATUS = '9' }
+            if ($failureKind -eq 'list') { $env:HERDR_PANE_LIST_STATUS = '8' }
+            if ($failureKind -eq 'json') { $env:HERDR_PANE_LIST_JSON = 'invalid' }
+            $failure = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\Remove.ps1')) -join "`n"
+            Assert-Equal 1 $LASTEXITCODE "pane $failureKind cleanup failure status"
+            Assert-Contains 'Worktree removed, but' $failure "pane $failureKind partial-success diagnostic"
+            $env:HERDR_CLOSE_STATUS = '0'
+            $env:HERDR_PANE_LIST_STATUS = '0'
+            $env:HERDR_PANE_LIST_JSON = $savedPaneJson
+        }
+
+        foreach ($status in @('2', '127')) {
+            $env:FZF_STUB_STATUS = $status
+            Remove-Item -LiteralPath $wtLog -ErrorAction SilentlyContinue
+            $failure = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\Picker.ps1') 'default') -join "`n"
+            Assert-Equal 1 $LASTEXITCODE 'fzf native failure status'
+            Assert-Contains "fzf selection failed (exit code $status)" $failure 'fzf diagnostic'
+            Assert-False ([System.IO.File]::ReadAllText($wtLog).Contains('switch ')) 'failed fzf does not switch'
+        }
+        $env:FZF_STUB_STATUS = '1'
+        $env:FZF_STUB_PICK = 'new-query'
+        Assert-Equal 'new-query' (Select-WorktrunkBranch @('main') 'test' 'test' -AllowQuery) 'fzf no-match query'
+        $threw = $false
+        try { Select-WorktrunkBranch @('main') 'test' 'test' } catch { $threw = $true }
+        Assert-True $threw 'fzf no-match without query throws'
+
+        # Git emits UTF-8 branch names; relabel must decode and forward them intact.
+        $unicodeBranch = 'feature-' + [char]0x00e9 + [char]0x65e5
+        & git -C $repo branch $unicodeBranch
+        & git -C $repo checkout --quiet $unicodeBranch
+        Remove-Item -LiteralPath $stubLog -ErrorAction SilentlyContinue
+        Push-Location $repo
+        try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'scripts\TabRelabel.ps1') $herdrStub 't-unicode' '^' $repo
+            Assert-Equal 0 $LASTEXITCODE 'unicode relabel status'
+        } finally { Pop-Location }
+        Assert-Contains "tab rename t-unicode `"$unicodeBranch (^)`"" ([System.IO.File]::ReadAllText($stubLog)) 'unicode relabel argv'
+
         $env:FZF_STUB_PICK = ''
         $env:FZF_STUB_STATUS = '130'
         Remove-Item -LiteralPath $wtLog, $stubLog -ErrorAction SilentlyContinue
@@ -343,6 +458,15 @@ exit /b 0
         $wtCalls = [System.IO.File]::ReadAllText($wtLog)
         Assert-False ($wtCalls.Contains('switch ')) 'cancelled picker does not switch worktrees'
     }
+
+    $readme = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'README.md'))
+    Assert-Contains 'git clone --branch windows-powershell --single-branch https://github.com/giard-alexandre/herdr-worktrunk-windows.git' $readme 'branch-safe clone'
+    Assert-Contains 'herdr plugin install giard-alexandre/herdr-worktrunk-windows --ref windows-powershell' $readme 'branch-safe install'
+    Assert-False ($readme.Contains('YOUR-OWNER')) 'no placeholder repository'
+    Assert-Contains 'plugin does not ask' $readme 'immediate removal documented'
+    $removeScript = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'scripts/Remove.ps1'))
+    Assert-Contains 'remove immediately (no confirmation)' $removeScript 'picker states immediate removal'
+    Assert-False ($removeScript.Contains('will ask to confirm')) 'no false confirmation promise'
 
     $manifest = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'herdr-plugin.toml'))
     Assert-Contains 'platforms = ["windows"]' $manifest 'manifest'

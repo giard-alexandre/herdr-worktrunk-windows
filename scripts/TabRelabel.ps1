@@ -7,6 +7,8 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
 . (Join-Path $PSScriptRoot 'Worktrunk.Common.ps1')
 
 try {

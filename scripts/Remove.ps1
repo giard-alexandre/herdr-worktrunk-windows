@@ -19,7 +19,7 @@ try {
     }
 
     $name = Select-WorktrunkBranch $candidates 'remove worktree > ' `
-        'Enter: remove (Worktrunk will ask to confirm); Esc: cancel'
+        'Enter: remove immediately (no confirmation); Esc: cancel'
     if ([string]::IsNullOrWhiteSpace($name)) { exit 0 }
 
     $selected = $items | Where-Object { $_.Kind -eq 'worktree' -and $_.Branch -eq $name } | Select-Object -First 1

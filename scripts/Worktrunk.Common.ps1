@@ -291,6 +291,9 @@ function Close-WorktrunkUi {
     $herdr = Get-HerdrCommand
     if (-not [string]::IsNullOrWhiteSpace($WorkspaceId)) {
         & $herdr workspace close $WorkspaceId
+        if ($LASTEXITCODE -ne 0) {
+            throw "Worktree removed, but Herdr workspace close failed (exit code $LASTEXITCODE). Close workspace '$WorkspaceId' manually."
+        }
         return
     }
     if ([string]::IsNullOrWhiteSpace($WorktreePath)) { return }
@@ -305,14 +308,18 @@ function Close-WorktrunkUi {
     # popup has no HERDR_PANE_ID and must not guess which matching pane is itself.
     if ([string]::IsNullOrWhiteSpace($self)) { return }
 
-    try { $response = ConvertFrom-NativeJson $herdr @('pane', 'list', '--json') 'Failed to list Herdr panes' }
-    catch { return }
+    $response = ConvertFrom-NativeJson $herdr @('pane', 'list', '--json') 'Worktree removed, but failed to list Herdr panes for cleanup'
+    $failedPanes = @()
     foreach ($pane in @(Get-ObjectProperty (Get-ObjectProperty $response 'result') 'panes' @())) {
         $paneId = [string](Get-ObjectProperty $pane 'pane_id')
         $cwd = [string](Get-ObjectProperty $pane 'cwd')
         if ($paneId -ne $self -and (Test-WindowsPathWithin $cwd $normalized)) {
             & $herdr pane close $paneId
+            if ($LASTEXITCODE -ne 0) { $failedPanes += "$paneId (exit code $LASTEXITCODE)" }
         }
+    }
+    if ($failedPanes.Count -gt 0) {
+        throw "Worktree removed, but Herdr pane cleanup failed. Close these panes manually: $($failedPanes -join ', ')."
     }
 }
 
@@ -338,7 +345,10 @@ function Select-WorktrunkBranch {
 
     $output = @($Candidates | & fzf @arguments)
     $status = $LASTEXITCODE
-    if ($status -gt 1) { return $null }
+    if ($status -eq 130) { return $null }
+    if ($status -ne 0 -and -not ($status -eq 1 -and $AllowQuery)) {
+        throw "fzf selection failed (exit code $status)"
+    }
     if ($output.Count -eq 0) { return $null }
     return [string]$output[$output.Count - 1]
 }
@@ -408,9 +418,9 @@ function Get-TabSwitchCommand {
         $switch = 'git-wt ' + ($quoted -join ' ')
         $relabelValues = @($RelabelScript, $Herdr, $TabId, $Name, $StartCwd) |
             ForEach-Object { ConvertTo-NushellLiteral $_ }
-        # Nushell stops a semicolon chain when the wrapped native command fails;
-        # retain an explicit status check as defense in depth before relabeling.
-        return "print -n ($switch); if (`$env.LAST_EXIT_CODE == 0) { powershell.exe -NoProfile -ExecutionPolicy Bypass -File $($relabelValues -join ' ') }"
+        # Wrapping in print propagates integration failures and aborts the chain.
+        # Worktrunk v0.60's with-env leaves LAST_EXIT_CODE absent or stale on success.
+        return "print -n ($switch); powershell.exe -NoProfile -ExecutionPolicy Bypass -File $($relabelValues -join ' ')"
     }
     throw "Tab mode supports PowerShell and Nushell on Windows; pane shell '$ShellName' is unsupported."
 }

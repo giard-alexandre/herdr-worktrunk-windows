@@ -40,15 +40,15 @@ an unrelated `wt.exe` application alias.
 For local development:
 
 ```powershell
-git clone https://github.com/YOUR-OWNER/herdr-worktrunk-windows
+git clone --branch windows-powershell --single-branch https://github.com/giard-alexandre/herdr-worktrunk-windows.git
 Set-Location herdr-worktrunk-windows
 herdr plugin link $PWD
 ```
 
-After publishing the fork on GitHub:
+Install directly from GitHub (the branch is required; default `main` is the Bash plugin):
 
 ```powershell
-herdr plugin install YOUR-OWNER/herdr-worktrunk-windows
+herdr plugin install giard-alexandre/herdr-worktrunk-windows --ref windows-powershell
 ```
 
 The plugin ID is `worktrunk.windows`.
@@ -162,8 +162,8 @@ Supported values are:
 - `--no-hooks`
 - `--stage=all|tracked|none`
 
-Destructive confirmation and unmerged/untracked-file protection remain owned by
-Worktrunk.
+Selecting removal immediately runs Worktrunk removal; the plugin does not ask
+for confirmation. Worktrunk's unmerged/untracked-file protections still apply.
 
 ## PowerShell execution policy
 
@@ -201,6 +201,16 @@ Run tests in native Windows PowerShell:
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
 ```
+
+To verify generated Nushell commands against the real Worktrunk integration,
+provide a v0.60 binary and its exact upstream `git-wt.nu` script (requires `nu`):
+
+```powershell
+powershell.exe -NoProfile -File tests\Test-NushellIntegration.ps1 -WorktrunkBinary C:\Tools\git-wt.exe -IntegrationScript C:\Tools\git-wt.nu
+```
+
+This checks successful switching and failed switching with absent and stale
+Nushell exit-status variables. Only the final relabel executable is mocked.
 
 When editing `herdr-plugin.toml`, relink the plugin:
 

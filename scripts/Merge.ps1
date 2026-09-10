@@ -48,7 +48,9 @@ try {
         exit 0
     }
 
-    & $worktrunk remove --foreground $name
+    $removeArguments = @('remove', '--foreground', $name)
+    if ($mergeFlags -contains '--no-hooks') { $removeArguments += '--no-hooks' }
+    & $worktrunk @removeArguments
     if ($LASTEXITCODE -ne 0) {
         Wait-ForKey 'Merged, but Worktrunk remove failed (see above). Press any key to close.'
         exit 0
