@@ -12,8 +12,10 @@ $OutputEncoding = [Console]::OutputEncoding
 . (Join-Path $PSScriptRoot 'Worktrunk.Common.ps1')
 
 try {
-    $branch = (@(& git branch --show-current 2>$null) -join '').Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch)) { exit 0 }
+    $branchResult = Invoke-WorktrunkNativeCommand 'git' @('branch', '--show-current') `
+        'Git tab branch lookup' 'Failed to inspect the switched Git branch'
+    $branch = ($branchResult.Output -join '').Trim()
+    if ([string]::IsNullOrWhiteSpace($branch)) { exit 0 }
 
     $current = (Get-Location).Path
     if ($branch -ne $Name -and (Test-WindowsPathEqual $current $StartCwd) -and
@@ -26,10 +28,11 @@ try {
         $label = Get-WorktrunkSwitchLabel $branch $Name
     }
 
-    & $Herdr tab rename $TabId $label *> $null
-    exit $LASTEXITCODE
+    $null = Invoke-WorktrunkNativeCommand $Herdr @('tab', 'rename', $TabId, $label) `
+        'Herdr tab relabel' 'Failed to rename the Worktrunk tab'
+    exit 0
 }
 catch {
-    Write-Warning $_.Exception.Message
-    exit 0
+    Report-WorktrunkError 'Worktrunk tab relabel' $_ -Notify
+    exit 1
 }

@@ -58,8 +58,9 @@ try {
         $nativeJsonFile = Join-Path $tempRoot 'native-json.cmd'
         @'
 @echo off
-echo Created worktree 1>&2
-echo {"branch":"created"}
+echo Native diagnostic text 1>&2
+if "%2"=="json" echo {"branch":"created"}
+if "%2"=="invalid" echo not-json
 exit /b %1
 '@ | Set-Content -LiteralPath $nativeJsonFile -Encoding ASCII
         $nativeJsonCommand = $env:ComSpec
@@ -68,23 +69,88 @@ exit /b %1
     else {
         $nativeJsonFile = Join-Path $tempRoot 'native-json.sh'
         @'
-printf 'Created worktree\n' >&2
-printf '%s\n' '{"branch":"created"}'
+printf 'Native diagnostic text\n' >&2
+if [ "$2" = json ]; then printf '%s\n' '{"branch":"created"}'; fi
+if [ "$2" = invalid ]; then printf '%s\n' 'not-json'; fi
 exit "$1"
 '@ | Set-Content -LiteralPath $nativeJsonFile -Encoding ASCII
         $nativeJsonCommand = '/bin/sh'
         $nativeJsonArguments = @($nativeJsonFile)
     }
-    $nativeResult = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('0'))
+    $nativeResult = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('0', 'json'))
     Assert-Equal 'created' $nativeResult.branch 'JSON from successful command with stderr'
+
     $nativeFailure = $null
+    $nativeFailureRecord = $null
     try {
-        $null = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('7'))
+        $null = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('7', 'json')) `
+            'Native test failed' 'native test stage'
     }
-    catch { $nativeFailure = $_.Exception.Message }
-    Assert-Equal 'Command failed (exit code 7)' $nativeFailure 'native failure despite valid JSON'
+    catch {
+        $nativeFailure = $_.Exception.Message
+        $nativeFailureRecord = $_
+    }
+    Assert-Contains 'Native test failed (exit code 7)' $nativeFailure 'native nonzero status'
+    Assert-Contains 'Native diagnostic text' $nativeFailure 'native nonzero diagnostic'
+
+    $emptyFailure = $null
+    try {
+        $null = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('0', 'empty'))
+    }
+    catch { $emptyFailure = $_.Exception.Message }
+    Assert-Contains 'command returned no JSON' $emptyFailure 'empty native JSON diagnostic'
+
+    $invalidFailure = $null
+    try {
+        $null = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('0', 'invalid'))
+    }
+    catch { $invalidFailure = $_.Exception.Message }
+    Assert-Contains 'invalid JSON' $invalidFailure 'malformed native JSON diagnostic'
+    Assert-Contains 'JSON parse error' $invalidFailure 'malformed native JSON parser detail'
+
+    $missingFailure = $null
+    try {
+        $null = Invoke-WorktrunkNativeCommand (Join-Path $tempRoot 'missing-native-command') @('arg') `
+            'missing command test' 'Missing command failed'
+    }
+    catch { $missingFailure = $_.Exception.Message }
+    Assert-Contains 'command could not be started' $missingFailure 'missing native command diagnostic'
+    Assert-Contains 'exit code -1' $missingFailure 'missing native command synthetic status'
 
     $env:HERDR_PLUGIN_CONFIG_DIR = $configDir
+    $firstLog = Write-WorktrunkErrorLog 'Native test operation' $nativeFailureRecord
+    Assert-True (Test-Path -LiteralPath $firstLog -PathType Leaf) 'error log persisted'
+    $firstLogText = [System.IO.File]::ReadAllText($firstLog)
+    Assert-Contains 'Operation: Native test operation' $firstLogText 'error log operation'
+    Assert-Contains 'Stage: native test stage' $firstLogText 'error log stage'
+    Assert-Contains 'Native exit status: 7' $firstLogText 'error log native status'
+    Assert-Contains 'Native diagnostic text' $firstLogText 'error log diagnostics'
+    Assert-Contains 'Stack trace:' $firstLogText 'error log stack trace field'
+    $redacted = Protect-WorktrunkLogText 'https://user:password@example.test token=abc123 Authorization: Bearer secret-value'
+    Assert-False ($redacted.Contains('password@example')) 'URL credentials are redacted from logs'
+    Assert-False ($redacted.Contains('abc123')) 'token values are redacted from logs'
+    Assert-False ($redacted.Contains('secret-value')) 'authorization values are redacted from logs'
+
+    foreach ($index in 1..24) {
+        $null = Write-WorktrunkErrorLog "Bounded log $index" $nativeFailureRecord
+    }
+    $retainedLogs = @(Get-ChildItem -LiteralPath (Get-WorktrunkErrorLogDirectory) -Filter '*.log')
+    Assert-True ($retainedLogs.Count -le 20) 'error log count is bounded'
+
+    $blockedLogRoot = Join-Path $tempRoot 'not-a-directory'
+    'file' | Set-Content -LiteralPath $blockedLogRoot -Encoding ASCII
+    $env:HERDR_PLUGIN_CONFIG_DIR = $blockedLogRoot
+    $isolatedLogResult = Write-WorktrunkErrorLog 'Logging isolation' $nativeFailureRecord
+    Assert-Equal $null $isolatedLogResult 'logging failure is isolated'
+    $env:HERDR_PLUGIN_CONFIG_DIR = $configDir
+
+    $savedNoninteractive = $env:WORKTRUNK_NONINTERACTIVE
+    $env:WORKTRUNK_NONINTERACTIVE = '1'
+    $waitTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    Wait-ForKey 'Noninteractive wait test.'
+    $waitTimer.Stop()
+    Assert-True ($waitTimer.Elapsed.TotalSeconds -lt 1) 'noninteractive wait does not hang'
+    $env:WORKTRUNK_NONINTERACTIVE = $savedNoninteractive
 
     Assert-Equal 'workspace' (Get-WorktrunkOpenMode) 'default open mode'
     Assert-Equal 'split' (Get-WorktrunkPickerPlacement) 'default picker placement'
@@ -215,12 +281,19 @@ open_mode = "workspace" # last value wins
         # through an environment override while remaining independent of the pane cwd.
         $stubLog = Join-Path $tempRoot 'herdr.log'
         $herdrStub = Join-Path $stubDir 'herdr.cmd'
-        "@echo off`r`necho %*>>`"$stubLog`"`r`nexit /b 0`r`n" |
-            Set-Content -LiteralPath $herdrStub -Encoding ASCII
+        @"
+@echo off
+echo %*>>"$stubLog"
+if "%1 %2"=="notification show" exit /b %HERDR_NOTIFICATION_STATUS%
+if not "%HERDR_OPEN_STATUS%"=="0" echo pane launch exploded 1>&2
+exit /b %HERDR_OPEN_STATUS%
+"@ | Set-Content -LiteralPath $herdrStub -Encoding ASCII
         $env:HERDR_BIN_PATH = $herdrStub
         $env:HERDR_PLUGIN_ID = 'worktrunk.windows'
         $env:HERDR_PLUGIN_CONFIG_DIR = $configDir
         $env:HERDR_PLUGIN_CONTEXT_JSON = '{"workspace_cwd":"C:\\Projects\\Repo Here","focused_pane_cwd":"C:\\Other"}'
+        $env:HERDR_OPEN_STATUS = '0'
+        $env:HERDR_NOTIFICATION_STATUS = '0'
         'picker_placement = "split"' | Set-Content -LiteralPath (Join-Path $configDir 'config.toml') -Encoding ASCII
 
         & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
@@ -231,6 +304,23 @@ open_mode = "workspace" # last value wins
         Assert-Contains '--entrypoint picker-default' $openLog 'Herdr open arguments'
         Assert-Contains '--env "WORKTRUNK_REPO_CWD=C:\Projects\Repo Here"' $openLog 'Herdr open arguments'
         Assert-Contains '--placement split --direction down' $openLog 'Herdr open arguments'
+
+        # Launcher failures have no visible picker pane. Preserve their native
+        # diagnostic and status, persist a log, and notify without allowing a
+        # notification failure to replace the launch failure.
+        $env:HERDR_OPEN_STATUS = '9'
+        $env:HERDR_NOTIFICATION_STATUS = '11'
+        Remove-Item -LiteralPath $stubLog -ErrorAction SilentlyContinue
+        $openFailure = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $RepoRoot 'scripts\Open.ps1') 'picker-default') -join "`n"
+        Assert-Equal 1 $LASTEXITCODE 'failed Open.ps1 status'
+        Assert-Contains 'exit code 9' $openFailure 'launcher native status'
+        Assert-Contains 'pane launch exploded' $openFailure 'launcher native diagnostic'
+        Assert-Contains 'Error log:' $openFailure 'launcher log location display'
+        $openFailureCalls = [System.IO.File]::ReadAllText($stubLog)
+        Assert-Contains 'notification show' $openFailureCalls 'launcher failure notification attempt'
+        $env:HERDR_OPEN_STATUS = '0'
+        $env:HERDR_NOTIFICATION_STATUS = '0'
 
         # Native-command integration smoke tests for picker, merge, and remove.
         $env:PATH = "$stubDir;$oldPath"
@@ -255,7 +345,9 @@ echo %*>>"%WT_STUB_LOG%"
 if "%1"=="list" echo %WT_STUB_LIST%
 if "%1"=="switch" echo %WT_SWITCH_JSON%
 if "%1"=="switch" echo Created worktree 1>&2
+if "%1"=="merge" if not "%WT_MERGE_STATUS%"=="0" echo merge exploded 1>&2
 if "%1"=="merge" exit /b %WT_MERGE_STATUS%
+if "%1"=="remove" if not "%WT_REMOVE_STATUS%"=="0" echo remove exploded 1>&2
 if "%1"=="remove" exit /b %WT_REMOVE_STATUS%
 exit /b 0
 '@ | Set-Content -LiteralPath (Join-Path $stubDir 'git-wt.cmd') -Encoding ASCII
@@ -266,10 +358,19 @@ if "%1 %2"=="worktree list" echo %HERDR_LIST_JSON%
 if "%1 %2"=="pane list" echo %HERDR_PANE_LIST_JSON%
 if "%1 %2"=="tab create" echo %HERDR_TAB_CREATE_JSON%
 if "%1 %2"=="pane process-info" echo {"result":{"process_info":{"shell_pid":42,"foreground_processes":[{"pid":42,"name":"%HERDR_STUB_SHELL%"}]}}}
+if "%1 %2"=="pane run" if not "%HERDR_PANE_RUN_STATUS%"=="0" echo pane run exploded 1>&2
 if "%1 %2"=="pane run" exit /b %HERDR_PANE_RUN_STATUS%
+if "%1 %2"=="tab close" if not "%HERDR_TAB_CLOSE_STATUS%"=="0" echo tab close exploded 1>&2
+if "%1 %2"=="tab close" exit /b %HERDR_TAB_CLOSE_STATUS%
+if "%1 %2"=="workspace close" if not "%HERDR_CLOSE_STATUS%"=="0" echo close exploded 1>&2
 if "%1 %2"=="workspace close" exit /b %HERDR_CLOSE_STATUS%
+if "%1 %2"=="pane close" if not "%HERDR_CLOSE_STATUS%"=="0" echo close exploded 1>&2
 if "%1 %2"=="pane close" exit /b %HERDR_CLOSE_STATUS%
+if "%1 %2"=="pane list" if not "%HERDR_PANE_LIST_STATUS%"=="0" echo pane list exploded 1>&2
 if "%1 %2"=="pane list" exit /b %HERDR_PANE_LIST_STATUS%
+if "%1 %2"=="tab rename" if not "%HERDR_RENAME_STATUS%"=="0" echo rename exploded 1>&2
+if "%1 %2"=="tab rename" exit /b %HERDR_RENAME_STATUS%
+if "%1 %2"=="notification show" exit /b %HERDR_NOTIFICATION_STATUS%
 exit /b 0
 '@ | Set-Content -LiteralPath $herdrStub -Encoding ASCII
 
@@ -287,8 +388,12 @@ exit /b 0
         $env:HERDR_STUB_SHELL = 'powershell.exe'
         $env:HERDR_TAB_CREATE_JSON = '{"result":{"tab":{"tab_id":"w1V:t3"},"root_pane":{"pane_id":"w1V:p5"}}}'
         $env:HERDR_PANE_RUN_STATUS = '0'
+        $env:HERDR_TAB_CLOSE_STATUS = '0'
         $env:HERDR_CLOSE_STATUS = '0'
         $env:HERDR_PANE_LIST_STATUS = '0'
+        $env:HERDR_RENAME_STATUS = '0'
+        $env:HERDR_NOTIFICATION_STATUS = '0'
+        $env:WORKTRUNK_NONINTERACTIVE = '1'
         $env:WORKTRUNK_REPO_CWD = $repo
         $env:HERDR_WORKSPACE_ID = 'w1'
         'open_mode = "workspace"' | Set-Content -LiteralPath (Join-Path $configDir 'config.toml') -Encoding ASCII
@@ -303,6 +408,16 @@ exit /b 0
         Assert-Contains 'switch --create feature/new --no-cd --format=json' $wtCalls 'Worktrunk picker arguments'
         Assert-Contains 'worktree open' $herdrCalls 'Herdr picker arguments'
         Assert-Contains '--path ' $herdrCalls 'Herdr picker arguments'
+
+        $env:WT_SWITCH_JSON = 'not-json'
+        Remove-Item -LiteralPath $wtLog, $stubLog -ErrorAction SilentlyContinue
+        $invalidPicker = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $RepoRoot 'scripts\Picker.ps1') 'default') -join "`n"
+        Assert-Equal 1 $LASTEXITCODE 'invalid picker JSON status'
+        Assert-Contains 'invalid JSON' $invalidPicker 'invalid picker JSON diagnostic'
+        Assert-Contains 'Error log:' $invalidPicker 'invalid picker JSON log location'
+        Assert-Contains 'Press any key to close.' $invalidPicker 'invalid picker acknowledgement prompt'
+        $env:WT_SWITCH_JSON = '{"branch":"feature/new","path":"' + $checkoutJsonPath + '"}'
 
         # Successful tab setup sends the switch command and keeps the new tab.
         # Unsupported shells and pane-run failures close that placeholder tab.
@@ -328,15 +443,19 @@ exit /b 0
 
         $env:HERDR_STUB_SHELL = 'powershell.exe'
         $env:HERDR_PANE_RUN_STATUS = '9'
+        $env:HERDR_TAB_CLOSE_STATUS = '12'
         Remove-Item -LiteralPath $wtLog, $stubLog -ErrorAction SilentlyContinue
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
-            (Join-Path $RepoRoot 'scripts\Picker.ps1') 'default' *> $null
+        $paneRunFailure = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $RepoRoot 'scripts\Picker.ps1') 'default') -join "`n"
         Assert-Equal 1 $LASTEXITCODE 'failed pane run exit status'
+        Assert-Contains 'pane run exploded' $paneRunFailure 'primary tab setup diagnostic preserved'
+        Assert-False ($paneRunFailure.Contains('tab close exploded')) 'cleanup failure does not replace primary error'
         $herdrCalls = [System.IO.File]::ReadAllText($stubLog)
         Assert-Contains 'pane run w1V:p5' $herdrCalls 'failed pane-run attempt'
         Assert-Contains 'tab close w1V:t3' $herdrCalls 'failed pane-run tab cleanup'
 
         $env:HERDR_PANE_RUN_STATUS = '0'
+        $env:HERDR_TAB_CLOSE_STATUS = '0'
         $env:HERDR_TAB_CREATE_JSON = '{"result":{"tab":{"tab_id":"w1V:t3"},"root_pane":{}}}'
         Remove-Item -LiteralPath $wtLog, $stubLog -ErrorAction SilentlyContinue
         & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
@@ -389,9 +508,19 @@ exit /b 0
         $env:WORKTRUNK_NONINTERACTIVE = '1'
         $env:WT_MERGE_STATUS = '7'
         Remove-Item -LiteralPath $wtLog, $stubLog -ErrorAction SilentlyContinue
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
-            (Join-Path $RepoRoot 'scripts\Merge.ps1')
-        Assert-Equal 0 $LASTEXITCODE 'failed Merge.ps1 handled exit status'
+        $savedTestErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $mergeFailure = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
+                (Join-Path $RepoRoot 'scripts\Merge.ps1') 2>&1) -join "`n"
+            $mergeExitStatus = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $savedTestErrorPreference }
+        Assert-Equal 1 $mergeExitStatus 'failed Merge.ps1 status'
+        Assert-Contains 'Worktrunk merge failed (exit code 7)' $mergeFailure 'merge failure context and status'
+        Assert-Contains 'merge exploded' $mergeFailure 'streamed merge diagnostic remains visible'
+        Assert-Contains 'Error log:' $mergeFailure 'merge failure log location'
+        Assert-Contains 'Press any key to close.' $mergeFailure 'merge failure acknowledgement prompt'
         $wtCalls = [System.IO.File]::ReadAllText($wtLog)
         Assert-False ($wtCalls.Contains('remove --foreground')) 'failed merge does not remove'
         $herdrCalls = [System.IO.File]::ReadAllText($stubLog)
@@ -400,9 +529,18 @@ exit /b 0
         $env:WT_MERGE_STATUS = '0'
         $env:WT_REMOVE_STATUS = '8'
         Remove-Item -LiteralPath $wtLog, $stubLog -ErrorAction SilentlyContinue
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
-            (Join-Path $RepoRoot 'scripts\Remove.ps1')
-        Assert-Equal 0 $LASTEXITCODE 'failed Remove.ps1 handled exit status'
+        $savedTestErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $removeFailure = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `
+                (Join-Path $RepoRoot 'scripts\Remove.ps1') 2>&1) -join "`n"
+            $removeExitStatus = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $savedTestErrorPreference }
+        Assert-Equal 1 $removeExitStatus 'failed Remove.ps1 status'
+        Assert-Contains 'Worktrunk remove failed (exit code 8)' $removeFailure 'remove failure context and status'
+        Assert-Contains 'remove exploded' $removeFailure 'streamed remove diagnostic remains visible'
+        Assert-Contains 'Press any key to close.' $removeFailure 'remove failure acknowledgement prompt'
         $herdrCalls = [System.IO.File]::ReadAllText($stubLog)
         Assert-False ($herdrCalls.Contains('workspace close')) 'failed remove does not close workspace'
 
@@ -481,6 +619,21 @@ exit /b 0
             Assert-Equal 0 $LASTEXITCODE 'unicode relabel status'
         } finally { Pop-Location }
         Assert-Contains "tab rename t-unicode `"$unicodeBranch (^)`"" ([System.IO.File]::ReadAllText($stubLog)) 'unicode relabel argv'
+
+        $env:HERDR_RENAME_STATUS = '12'
+        $env:HERDR_NOTIFICATION_STATUS = '13'
+        Remove-Item -LiteralPath $stubLog -ErrorAction SilentlyContinue
+        Push-Location $repo
+        try {
+            $relabelFailure = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+                (Join-Path $RepoRoot 'scripts\TabRelabel.ps1') $herdrStub 't-fail' '^' $repo) -join "`n"
+            Assert-Equal 1 $LASTEXITCODE 'failed tab relabel status'
+        } finally { Pop-Location }
+        Assert-Contains 'rename exploded' $relabelFailure 'tab relabel native diagnostic'
+        Assert-Contains 'Error log:' $relabelFailure 'tab relabel log location'
+        Assert-Contains 'notification show' ([System.IO.File]::ReadAllText($stubLog)) 'tab relabel notification attempt'
+        $env:HERDR_RENAME_STATUS = '0'
+        $env:HERDR_NOTIFICATION_STATUS = '0'
 
         $env:FZF_STUB_PICK = ''
         $env:FZF_STUB_STATUS = '130'

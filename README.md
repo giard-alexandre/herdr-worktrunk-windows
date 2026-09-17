@@ -176,6 +176,40 @@ the process exit code to determine success, not the presence of stderr output.
 After updating the plugin, select the existing branch again to register its
 checkout; there is no need to delete or recreate the worktree.
 
+## Errors and diagnostics
+
+Native command stdout and stderr are kept separate when the plugin expects JSON.
+A command may therefore write progress to stderr and still succeed; nonzero exits
+show the actual diagnostic together with the operation and exit status. Merge and
+remove commands remain attached to the terminal so Worktrunk hooks, prompts, and
+output continue to work normally.
+
+A failed picker, merge, or remove pane stays open at `Press any key to close.` so
+the error can be read. This acknowledgement is skipped when input is redirected
+or `WORKTRUNK_NONINTERACTIVE=1`, including automated tests. Cancellation remains
+a successful action. Launcher and background tab-relabel failures cannot keep a
+picker pane open, so they make a best-effort Herdr notification instead.
+
+Every reported failure also writes one file under `error-logs` in the plugin
+configuration directory:
+
+```powershell
+$configDir = herdr plugin config-dir worktrunk.windows
+Get-ChildItem (Join-Path $configDir 'error-logs') | Sort-Object Name -Descending
+```
+
+Logs include the UTC timestamp, operation and stage, current directory, native
+exit status and bounded diagnostics, exception, and stack trace. They do not
+capture the environment, command arguments, or terminal transcript, and common
+credential and token forms are redacted. Each field is truncated to a fixed
+limit and only the newest 20 log files are retained;
+unique filenames allow overlapping plugin actions to report independently.
+Logging and notification failures never replace the original error.
+
+Set `WORKTRUNK_DEBUG=1` to also print the PowerShell stack trace in the failing
+pane. The same stack is already present in the persistent error log, so this is
+mainly useful during live development.
+
 ## PowerShell execution policy
 
 Every manifest command requests a process-scoped execution-policy bypass:

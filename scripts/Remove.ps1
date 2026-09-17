@@ -29,16 +29,13 @@ try {
     $worktreePath = [string]$selected.Path
     $workspaceId = Get-OpenWorkspaceId $worktreePath
 
-    & (Get-WorktrunkCommand) remove --foreground $name
-    if ($LASTEXITCODE -ne 0) {
-        Wait-ForKey 'Worktrunk remove failed (see above). Press any key to close.'
-        exit 0
-    }
+    Invoke-WorktrunkNativeCommand (Get-WorktrunkCommand) @('remove', '--foreground', $name) `
+        'Worktrunk removal' 'Worktrunk remove failed' -Interactive
 
     Close-WorktrunkUi $workspaceId $worktreePath
     exit 0
 }
 catch {
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Report-WorktrunkError 'Worktree removal' $_ -Wait
     exit 1
 }

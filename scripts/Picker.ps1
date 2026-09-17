@@ -18,8 +18,10 @@ function Get-CandidateBranches {
     $candidates = New-Object System.Collections.Generic.List[string]
     $seen = @{}
 
-    $lines = @(& git for-each-ref '--format=%(refname) %(refname:short)' @refs 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to list Git branches.' }
+    $gitResult = Invoke-WorktrunkNativeCommand 'git' `
+        (@('for-each-ref', '--format=%(refname) %(refname:short)') + $refs) `
+        'Git branch list' 'Failed to list Git branches'
+    $lines = @($gitResult.Output)
     foreach ($line in $lines) {
         $space = $line.IndexOf(' ')
         if ($space -lt 1) { continue }
@@ -54,12 +56,16 @@ try {
     $createBaseLabel = 'default branch'
     if ($Mode -eq 'current') {
         $createBase = '@'
-        $currentBranch = (@(& git branch --show-current 2>$null) -join '').Trim()
+        $branchResult = Invoke-WorktrunkNativeCommand 'git' @('branch', '--show-current') `
+            'Git current branch lookup' 'Failed to inspect the current Git branch'
+        $currentBranch = ($branchResult.Output -join '').Trim()
         if (-not [string]::IsNullOrWhiteSpace($currentBranch)) {
             $createBaseLabel = "current branch ($currentBranch)"
         }
         else {
-            $currentCommit = (@(& git rev-parse --short HEAD 2>$null) -join '').Trim()
+            $commitResult = Invoke-WorktrunkNativeCommand 'git' @('rev-parse', '--short', 'HEAD') `
+                'Git current commit lookup' 'Failed to inspect the current Git commit'
+            $currentCommit = ($commitResult.Output -join '').Trim()
             if (-not [string]::IsNullOrWhiteSpace($currentCommit)) {
                 $createBaseLabel = "current HEAD ($currentCommit)"
             }
@@ -91,7 +97,7 @@ try {
             $tabResponse = ConvertFrom-NativeJson $herdr @(
                 'tab', 'create', '--workspace', $env:HERDR_WORKSPACE_ID,
                 '--cwd', (Get-Location).Path, '--label', $name, '--focus'
-            ) 'Failed to open worktree tab'
+            ) 'Failed to open worktree tab' 'Herdr tab creation'
             $tabResult = Get-ObjectProperty $tabResponse 'result'
             $rootPane = Get-ObjectProperty $tabResult 'root_pane'
             $newPane = [string](Get-ObjectProperty $rootPane 'pane_id')
@@ -114,22 +120,28 @@ try {
             }
             $line = Get-TabSwitchCommand $shellName (Join-Path $PSScriptRoot 'TabRelabel.ps1') `
                 $herdr $tabId $name (Get-Location).Path $worktrunkArguments
-            & $herdr pane run $newPane $line
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to send the Worktrunk command to the new tab.' }
+            $null = Invoke-WorktrunkNativeCommand $herdr @('pane', 'run', $newPane, $line) `
+                'Herdr tab command dispatch' 'Failed to send the Worktrunk command to the new tab'
             $createdTabId = $null
             exit 0
         }
         catch {
+            $primaryError = $_
             if (-not [string]::IsNullOrWhiteSpace($createdTabId)) {
-                & $herdr tab close $createdTabId *> $null
+                try {
+                    $null = Invoke-WorktrunkNativeCommand $herdr @('tab', 'close', $createdTabId) `
+                        'Herdr placeholder tab cleanup' 'Failed to close the placeholder tab'
+                }
+                catch { }
             }
-            throw
+            throw $primaryError
         }
     }
 
     $worktrunk = Get-WorktrunkCommand
     $switchArguments = @($worktrunkArguments + @('--no-cd', '--format=json'))
-    $result = ConvertFrom-NativeJson $worktrunk $switchArguments 'Worktrunk switch failed'
+    $result = ConvertFrom-NativeJson $worktrunk $switchArguments `
+        'Worktrunk switch failed' 'Worktrunk switch'
     $branch = [string](Get-ObjectProperty $result 'branch')
     $label = Get-WorktrunkSwitchLabel $branch $name
     $worktreePath = [string](Get-ObjectProperty $result 'path')
@@ -161,8 +173,9 @@ try {
             $repoLabel = $repoLabel.Substring(0, $repoLabel.Length - 4)
         }
         if (-not [string]::IsNullOrWhiteSpace($repoLabel)) {
-            & $herdr workspace create --cwd $repoRoot --label $repoLabel --no-focus *> $null
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to create the repository workspace.' }
+            $null = Invoke-WorktrunkNativeCommand $herdr `
+                @('workspace', 'create', '--cwd', $repoRoot, '--label', $repoLabel, '--no-focus') `
+                'Herdr repository workspace creation' 'Failed to create the repository workspace'
         }
     }
 
@@ -171,11 +184,11 @@ try {
         $openArguments += @('--label', $label)
     }
     $openArguments += @('--focus', '--json')
-    & $herdr @openArguments
-    exit $LASTEXITCODE
+    $null = Invoke-WorktrunkNativeCommand $herdr $openArguments `
+        'Herdr worktree registration' 'Failed to open the worktree in Herdr'
+    exit 0
 }
 catch {
-    Write-Host $_.Exception.Message -ForegroundColor Red
-    if ($env:WORKTRUNK_DEBUG -eq '1') { Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray }
+    Report-WorktrunkError 'Worktree picker' $_ -Wait
     exit 1
 }

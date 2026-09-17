@@ -43,10 +43,11 @@ try {
         $arguments += @('--placement', 'split', '--direction', 'down')
     }
 
-    & (Get-HerdrCommand) @arguments
-    exit $LASTEXITCODE
+    $null = Invoke-WorktrunkNativeCommand (Get-HerdrCommand) $arguments `
+        'Herdr plugin pane launch' 'Failed to open the Worktrunk pane'
+    exit 0
 }
 catch {
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Report-WorktrunkError 'Worktrunk launcher' $_ -Notify
     exit 1
 }
