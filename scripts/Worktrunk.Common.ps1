@@ -29,28 +29,253 @@ function Get-WorktrunkCommand {
     return $command.Name
 }
 
+function Limit-WorktrunkText {
+    param([AllowNull()][string]$Text, [int]$MaximumLength = 16384)
+
+    if ([string]::IsNullOrEmpty($Text) -or $Text.Length -le $MaximumLength) { return $Text }
+    return $Text.Substring(0, $MaximumLength) + "`r`n[truncated]"
+}
+
+function Protect-WorktrunkLogText {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $value = [regex]::Replace($Text, '(?i)\b(https?://)[^/\s:@]+(?::[^@/\s]*)?@', '$1<redacted>@')
+    $value = [regex]::Replace($value, '(?i)\b(authorization\s*:\s*(?:bearer|basic)\s+)\S+', '$1<redacted>')
+    return [regex]::Replace($value, `
+        '(?i)\b((?:token|password|passwd|secret|api[_-]?key)\s*[=:]\s*)[^\s;]+', '$1<redacted>')
+}
+
+function Throw-WorktrunkNativeError {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [AllowNull()][string]$Diagnostics
+    )
+
+    $diagnosticText = ([string](Limit-WorktrunkText $Diagnostics 4096)).Trim()
+    $displayMessage = "$Message (exit code $ExitCode)"
+    if (-not [string]::IsNullOrWhiteSpace($diagnosticText)) {
+        $displayMessage += ": $diagnosticText"
+    }
+    $exception = New-Object System.InvalidOperationException($displayMessage)
+    $exception.Data['Worktrunk.Stage'] = $Stage
+    $exception.Data['Worktrunk.ExitCode'] = $ExitCode
+    $exception.Data['Worktrunk.Diagnostics'] = [string]$Diagnostics
+    throw $exception
+}
+
+function Invoke-WorktrunkNativeCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][object[]]$ArgumentList,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [string]$FailureMessage = 'Command failed',
+        [switch]$Interactive
+    )
+
+    if ($Interactive) {
+        # Merge/remove hooks and prompts must retain their native terminal. Their
+        # output is already visible in the pane, so only add context and status.
+        & $FilePath @ArgumentList
+        $status = $LASTEXITCODE
+        if ($status -ne 0) {
+            Throw-WorktrunkNativeError $FailureMessage $Stage $status `
+                'Native diagnostics were streamed to the terminal above.'
+        }
+        return
+    }
+
+    # Windows PowerShell 5.1 formats ErrorRecords when stderr is redirected to
+    # a file, adding command/source excerpts to the native diagnostic. Read the
+    # records as data instead, keeping stderr separate from stdout used as JSON.
+    $stderr = New-Object System.Text.StringBuilder
+    $savedErrorActionPreference = $ErrorActionPreference
+    $output = @()
+    $status = $null
+    $invocationFailure = $null
+    try {
+        $ErrorActionPreference = 'Continue'
+        $global:LASTEXITCODE = $null
+        $output = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                [void]$stderr.AppendLine($_.ToString())
+            }
+            else {
+                $_
+            }
+        })
+        $status = $global:LASTEXITCODE
+    }
+    catch { $invocationFailure = $_ }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+        $diagnostics = $stderr.ToString()
+    }
+
+    if ($null -ne $invocationFailure) {
+        $startupDiagnostics = [string]$invocationFailure.Exception.Message
+        if (-not [string]::IsNullOrWhiteSpace($diagnostics)) {
+            $startupDiagnostics += [Environment]::NewLine + $diagnostics.Trim()
+        }
+        Throw-WorktrunkNativeError "$FailureMessage (command could not be started)" $Stage -1 $startupDiagnostics
+    }
+    if ($null -eq $status) {
+        Throw-WorktrunkNativeError "$FailureMessage (command returned no exit status)" $Stage -1 $diagnostics
+    }
+    if ($status -ne 0) {
+        Throw-WorktrunkNativeError $FailureMessage $Stage $status $diagnostics
+    }
+    return [pscustomobject]@{
+        Output = $output
+        Diagnostics = $diagnostics
+        ExitCode = $status
+    }
+}
+
 function ConvertFrom-NativeJson {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][object[]]$ArgumentList,
-        [string]$FailureMessage = 'Command failed'
+        [string]$FailureMessage = 'Command failed',
+        [string]$Stage = 'native JSON command'
     )
 
-    $output = @(& $FilePath @ArgumentList 2>$null)
-    $status = $LASTEXITCODE
-    if ($status -ne 0) {
-        throw "$FailureMessage (exit code $status)"
-    }
-    $text = $output -join [Environment]::NewLine
+    $result = Invoke-WorktrunkNativeCommand $FilePath $ArgumentList $Stage $FailureMessage
+    $text = $result.Output -join [Environment]::NewLine
     if ([string]::IsNullOrWhiteSpace($text)) {
-        throw "$FailureMessage (command returned no JSON)"
+        Throw-WorktrunkNativeError "$FailureMessage (command returned no JSON)" $Stage 0 $result.Diagnostics
     }
     try {
         return $text | ConvertFrom-Json
     }
     catch {
-        throw "$FailureMessage (invalid JSON): $($_.Exception.Message)"
+        $diagnostics = "JSON parse error: $($_.Exception.Message)"
+        if (-not [string]::IsNullOrWhiteSpace($result.Diagnostics)) {
+            $diagnostics += [Environment]::NewLine + $result.Diagnostics.Trim()
+        }
+        Throw-WorktrunkNativeError "$FailureMessage (invalid JSON)" $Stage 0 $diagnostics
     }
+}
+
+function Get-WorktrunkErrorLogDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($env:HERDR_PLUGIN_CONFIG_DIR)) {
+        return Join-Path $env:HERDR_PLUGIN_CONFIG_DIR 'error-logs'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) { $root = Join-Path $env:APPDATA 'herdr' }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { $root = Join-Path $env:USERPROFILE 'AppData\Roaming\herdr' }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:HOME)) { $root = Join-Path $env:HOME '.config/herdr' }
+    else { $root = Join-Path ([System.IO.Path]::GetTempPath()) 'herdr' }
+    return Join-Path $root 'plugins/config/worktrunk.windows/error-logs'
+}
+
+function Write-WorktrunkErrorLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)]$ErrorRecord
+    )
+
+    try {
+        $exception = $ErrorRecord.Exception
+        $stage = $Operation
+        $exitStatus = 'not available'
+        $diagnostics = ''
+        if ($null -ne $exception -and $exception.Data.Contains('Worktrunk.Stage')) {
+            $stage = [string]$exception.Data['Worktrunk.Stage']
+        }
+        if ($null -ne $exception -and $exception.Data.Contains('Worktrunk.ExitCode')) {
+            $exitStatus = [string]$exception.Data['Worktrunk.ExitCode']
+        }
+        if ($null -ne $exception -and $exception.Data.Contains('Worktrunk.Diagnostics')) {
+            $diagnostics = [string]$exception.Data['Worktrunk.Diagnostics']
+        }
+        $cwd = '<unavailable>'
+        try { $cwd = (Get-Location).Path } catch { }
+        $stack = [string]$ErrorRecord.ScriptStackTrace
+        $lines = @(
+            'Timestamp: ' + [DateTime]::UtcNow.ToString('o'),
+            'Operation: ' + $Operation,
+            'Stage: ' + $stage,
+            'Cwd: ' + $cwd,
+            'Native exit status: ' + $exitStatus,
+            '',
+            'Diagnostics:',
+            (Limit-WorktrunkText (Protect-WorktrunkLogText $diagnostics) 16384),
+            '',
+            'Exception:',
+            (Limit-WorktrunkText (Protect-WorktrunkLogText ([string]$exception.Message)) 8192),
+            '',
+            'Stack trace:',
+            (Limit-WorktrunkText $stack 16384)
+        )
+
+        $directory = Get-WorktrunkErrorLogDirectory
+        [void](New-Item -ItemType Directory -Path $directory -Force)
+        $name = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + "-$PID-" + `
+            [guid]::NewGuid().ToString('N') + '.log'
+        $path = Join-Path $directory $name
+        [System.IO.File]::WriteAllText($path, ($lines -join [Environment]::NewLine), `
+            (New-Object System.Text.UTF8Encoding($false)))
+
+        # Unique files avoid cross-process append corruption. Best-effort pruning
+        # keeps the newest 20 records even when plugin actions overlap.
+        $logs = @(Get-ChildItem -LiteralPath $directory -Filter '*.log' -File -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending)
+        for ($index = 20; $index -lt $logs.Count; $index++) {
+            Remove-Item -LiteralPath $logs[$index].FullName -Force -ErrorAction SilentlyContinue
+        }
+        return $path
+    }
+    catch {
+        # Logging is supplementary and must never replace the original error.
+        return $null
+    }
+}
+
+function Send-WorktrunkFailureNotification {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [AllowNull()][string]$LogPath
+    )
+
+    try {
+        $body = Protect-WorktrunkLogText "$Operation failed: $Message"
+        if (-not [string]::IsNullOrWhiteSpace($LogPath)) { $body += "; Log: $LogPath" }
+        $body = Limit-WorktrunkText $body 1024
+        $null = Invoke-WorktrunkNativeCommand (Get-HerdrCommand) `
+            @('notification', 'show', 'Worktrunk failed', '--body', $body, '--sound', 'none') `
+            'Herdr failure notification' 'Failed to show Herdr failure notification'
+    }
+    catch {
+        # Notification errors are intentionally isolated to prevent recursion.
+    }
+}
+
+function Report-WorktrunkError {
+    param(
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)]$ErrorRecord,
+        [switch]$Wait,
+        [switch]$Notify
+    )
+
+    $message = [string]$ErrorRecord.Exception.Message
+    $logPath = Write-WorktrunkErrorLog $Operation $ErrorRecord
+    Write-Host "$Operation failed: $message" -ForegroundColor Red
+    if (-not [string]::IsNullOrWhiteSpace($logPath)) {
+        Write-Host "Error log: $logPath" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host 'Error log could not be written.' -ForegroundColor DarkGray
+    }
+    if ($env:WORKTRUNK_DEBUG -eq '1' -and -not [string]::IsNullOrWhiteSpace([string]$ErrorRecord.ScriptStackTrace)) {
+        Write-Host $ErrorRecord.ScriptStackTrace -ForegroundColor DarkGray
+    }
+    if ($Notify) { Send-WorktrunkFailureNotification $Operation $message $logPath }
+    if ($Wait) { Wait-ForKey 'Press any key to close.' }
 }
 
 function Get-WorktrunkConfigValue {
@@ -222,13 +447,9 @@ function ConvertTo-WorktrunkItems {
 }
 
 function Get-WorktrunkItems {
-    $worktrunk = Get-WorktrunkCommand
-    $output = @(& $worktrunk list --format=json 2>$null)
-    $status = $LASTEXITCODE
-    if ($status -ne 0) { throw "Failed to list worktrees (exit code $status)" }
-    $text = $output -join [Environment]::NewLine
-    if ([string]::IsNullOrWhiteSpace($text)) { throw 'Failed to list worktrees (command returned no JSON)' }
-    return @(ConvertTo-WorktrunkItems $text)
+    $response = ConvertFrom-NativeJson (Get-WorktrunkCommand) @('list', '--format=json') `
+        'Failed to list worktrees' 'Worktrunk worktree list'
+    return @(ConvertTo-WorktrunkItems $response)
 }
 
 function ConvertTo-NormalizedWindowsPath {
@@ -269,14 +490,14 @@ function Test-WindowsPathWithin {
 
 function Get-HerdrWorktreeList {
     param([Parameter(Mandatory = $true)][string]$Cwd)
-    return ConvertFrom-NativeJson (Get-HerdrCommand) @('worktree', 'list', '--cwd', $Cwd, '--json') 'Failed to query Herdr worktrees'
+    return ConvertFrom-NativeJson (Get-HerdrCommand) @('worktree', 'list', '--cwd', $Cwd, '--json') `
+        'Failed to query Herdr worktrees' 'Herdr worktree list'
 }
 
 function Get-OpenWorkspaceId {
     param([Parameter(Mandatory = $true)][string]$WorktreePath)
 
-    try { $response = Get-HerdrWorktreeList (Get-Location).Path }
-    catch { return $null }
+    $response = Get-HerdrWorktreeList (Get-Location).Path
     foreach ($worktree in @(Get-ObjectProperty (Get-ObjectProperty $response 'result') 'worktrees' @())) {
         if (Test-WindowsPathEqual (Get-ObjectProperty $worktree 'path') $WorktreePath) {
             return Get-ObjectProperty $worktree 'open_workspace_id'
@@ -290,10 +511,8 @@ function Close-WorktrunkUi {
 
     $herdr = Get-HerdrCommand
     if (-not [string]::IsNullOrWhiteSpace($WorkspaceId)) {
-        & $herdr workspace close $WorkspaceId
-        if ($LASTEXITCODE -ne 0) {
-            throw "Worktree removed, but Herdr workspace close failed (exit code $LASTEXITCODE). Close workspace '$WorkspaceId' manually."
-        }
+        $null = Invoke-WorktrunkNativeCommand $herdr @('workspace', 'close', $WorkspaceId) `
+            'Herdr workspace cleanup' "Worktree removed, but Herdr workspace close failed. Close workspace '$WorkspaceId' manually."
         return
     }
     if ([string]::IsNullOrWhiteSpace($WorktreePath)) { return }
@@ -308,18 +527,24 @@ function Close-WorktrunkUi {
     # popup has no HERDR_PANE_ID and must not guess which matching pane is itself.
     if ([string]::IsNullOrWhiteSpace($self)) { return }
 
-    $response = ConvertFrom-NativeJson $herdr @('pane', 'list', '--json') 'Worktree removed, but failed to list Herdr panes for cleanup'
+    $response = ConvertFrom-NativeJson $herdr @('pane', 'list', '--json') `
+        'Worktree removed, but failed to list Herdr panes for cleanup' 'Herdr pane cleanup list'
     $failedPanes = @()
     foreach ($pane in @(Get-ObjectProperty (Get-ObjectProperty $response 'result') 'panes' @())) {
         $paneId = [string](Get-ObjectProperty $pane 'pane_id')
         $cwd = [string](Get-ObjectProperty $pane 'cwd')
         if ($paneId -ne $self -and (Test-WindowsPathWithin $cwd $normalized)) {
-            & $herdr pane close $paneId
-            if ($LASTEXITCODE -ne 0) { $failedPanes += "$paneId (exit code $LASTEXITCODE)" }
+            try {
+                $null = Invoke-WorktrunkNativeCommand $herdr @('pane', 'close', $paneId) `
+                    'Herdr pane cleanup' "Worktree removed, but failed to close Herdr pane '$paneId'."
+            }
+            catch { $failedPanes += $_.Exception.Message }
         }
     }
     if ($failedPanes.Count -gt 0) {
-        throw "Worktree removed, but Herdr pane cleanup failed. Close these panes manually: $($failedPanes -join ', ')."
+        $diagnostics = $failedPanes -join [Environment]::NewLine
+        Throw-WorktrunkNativeError 'Worktree removed, but Herdr pane cleanup failed. Close the affected panes manually' `
+            'Herdr pane cleanup' 1 $diagnostics
     }
 }
 
@@ -347,7 +572,8 @@ function Select-WorktrunkBranch {
     $status = $LASTEXITCODE
     if ($status -eq 130) { return $null }
     if ($status -ne 0 -and -not ($status -eq 1 -and $AllowQuery)) {
-        throw "fzf selection failed (exit code $status)"
+        Throw-WorktrunkNativeError 'fzf selection failed' 'fzf branch selection' $status `
+            'fzf diagnostics were streamed to the terminal above.'
     }
     if ($output.Count -eq 0) { return $null }
     return [string]$output[$output.Count - 1]
@@ -368,10 +594,12 @@ function Get-PaneShellName {
     param([Parameter(Mandatory = $true)][string]$PaneId)
 
     $herdr = Get-HerdrCommand
+    $lastFailure = $null
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
         if ($attempt -gt 0) { Start-Sleep -Milliseconds 100 }
         try {
-            $response = ConvertFrom-NativeJson $herdr @('pane', 'process-info', '--pane', $PaneId) 'Unable to inspect pane process'
+            $response = ConvertFrom-NativeJson $herdr @('pane', 'process-info', '--pane', $PaneId) `
+                'Unable to inspect pane process' 'Herdr pane process inspection'
             $info = Get-ObjectProperty (Get-ObjectProperty $response 'result') 'process_info'
             $shellPid = Get-ObjectProperty $info 'shell_pid'
             foreach ($process in @(Get-ObjectProperty $info 'foreground_processes' @())) {
@@ -386,8 +614,9 @@ function Get-PaneShellName {
                 if ($null -ne $process) { return $process.ProcessName }
             }
         }
-        catch { }
+        catch { $lastFailure = $_ }
     }
+    if ($null -ne $lastFailure) { throw $lastFailure }
     # Do not guess: sending PowerShell syntax to cmd.exe or another configured
     # shell is worse than declining tab mode with a clear error.
     return $null

@@ -42,24 +42,18 @@ try {
     $worktrunk = Get-WorktrunkCommand
 
     $arguments = @('merge', '--no-remove', '-C', $worktreePath) + $mergeFlags
-    & $worktrunk @arguments
-    if ($LASTEXITCODE -ne 0) {
-        Wait-ForKey 'Worktrunk merge failed (see above). Press any key to close.'
-        exit 0
-    }
+    Invoke-WorktrunkNativeCommand $worktrunk $arguments 'Worktrunk merge' `
+        'Worktrunk merge failed' -Interactive
 
     $removeArguments = @('remove', '--foreground', $name)
     if ($mergeFlags -contains '--no-hooks') { $removeArguments += '--no-hooks' }
-    & $worktrunk @removeArguments
-    if ($LASTEXITCODE -ne 0) {
-        Wait-ForKey 'Merged, but Worktrunk remove failed (see above). Press any key to close.'
-        exit 0
-    }
+    Invoke-WorktrunkNativeCommand $worktrunk $removeArguments 'Worktrunk post-merge removal' `
+        'Merged, but Worktrunk remove failed' -Interactive
 
     Close-WorktrunkUi $workspaceId $worktreePath
     exit 0
 }
 catch {
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Report-WorktrunkError 'Worktree merge' $_ -Wait
     exit 1
 }
