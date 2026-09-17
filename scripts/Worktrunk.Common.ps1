@@ -87,10 +87,10 @@ function Invoke-WorktrunkNativeCommand {
         return
     }
 
-    # Windows PowerShell 5.1 turns redirected native stderr into ErrorRecords.
-    # Capture it separately from stdout under Continue, and trust the process
-    # exit code rather than treating successful diagnostic output as failure.
-    $stderrPath = [System.IO.Path]::GetTempFileName()
+    # Windows PowerShell 5.1 formats ErrorRecords when stderr is redirected to
+    # a file, adding command/source excerpts to the native diagnostic. Read the
+    # records as data instead, keeping stderr separate from stdout used as JSON.
+    $stderr = New-Object System.Text.StringBuilder
     $savedErrorActionPreference = $ErrorActionPreference
     $output = @()
     $status = $null
@@ -98,16 +98,20 @@ function Invoke-WorktrunkNativeCommand {
     try {
         $ErrorActionPreference = 'Continue'
         $global:LASTEXITCODE = $null
-        $output = @(& $FilePath @ArgumentList 2> $stderrPath)
+        $output = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                [void]$stderr.AppendLine($_.ToString())
+            }
+            else {
+                $_
+            }
+        })
         $status = $global:LASTEXITCODE
     }
     catch { $invocationFailure = $_ }
     finally {
         $ErrorActionPreference = $savedErrorActionPreference
-        $diagnostics = ''
-        try { $diagnostics = [System.IO.File]::ReadAllText($stderrPath) }
-        catch { }
-        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        $diagnostics = $stderr.ToString()
     }
 
     if ($null -ne $invocationFailure) {

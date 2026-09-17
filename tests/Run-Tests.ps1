@@ -77,6 +77,9 @@ exit "$1"
         $nativeJsonCommand = '/bin/sh'
         $nativeJsonArguments = @($nativeJsonFile)
     }
+    $nativeCapture = Invoke-WorktrunkNativeCommand $nativeJsonCommand `
+        ($nativeJsonArguments + @('0', 'json')) 'native stderr capture'
+    Assert-Equal 'Native diagnostic text' $nativeCapture.Diagnostics.Trim() 'unformatted native stderr'
     $nativeResult = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('0', 'json'))
     Assert-Equal 'created' $nativeResult.branch 'JSON from successful command with stderr'
 
@@ -92,6 +95,8 @@ exit "$1"
     }
     Assert-Contains 'Native test failed (exit code 7)' $nativeFailure 'native nonzero status'
     Assert-Contains 'Native diagnostic text' $nativeFailure 'native nonzero diagnostic'
+    Assert-Equal 'Native diagnostic text' `
+        $nativeFailureRecord.Exception.Data['Worktrunk.Diagnostics'].Trim() 'unformatted failure stderr'
 
     $emptyFailure = $null
     try {
