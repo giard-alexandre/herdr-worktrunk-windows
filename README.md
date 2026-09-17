@@ -165,6 +165,17 @@ Supported values are:
 Selecting removal immediately runs Worktrunk removal; the plugin does not ask
 for confirmation. Worktrunk's unmerged/untracked-file protections still apply.
 
+## Worktree created but not opened
+
+Worktrunk creates the checkout before the plugin registers it with Herdr. Earlier
+plugin versions could stop between these steps on Windows PowerShell 5.1:
+Worktrunk's success message on stderr was treated as a terminating PowerShell
+error, even when Worktrunk exited successfully. Native JSON commands now use
+the process exit code to determine success, not the presence of stderr output.
+
+After updating the plugin, select the existing branch again to register its
+checkout; there is no need to delete or recreate the worktree.
+
 ## PowerShell execution policy
 
 Every manifest command requests a process-scoped execution-policy bypass:

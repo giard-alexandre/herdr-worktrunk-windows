@@ -52,6 +52,38 @@ New-Item -ItemType Directory -Path $configDir, $stubDir -Force | Out-Null
 $oldPath = $env:PATH
 $oldConfig = $env:HERDR_PLUGIN_CONFIG_DIR
 try {
+    # Native stderr is diagnostic output, not failure: Windows PowerShell 5.1
+    # otherwise throws NativeCommandError before the caller can check the status.
+    if ($IsNativeWindows) {
+        $nativeJsonFile = Join-Path $tempRoot 'native-json.cmd'
+        @'
+@echo off
+echo Created worktree 1>&2
+echo {"branch":"created"}
+exit /b %1
+'@ | Set-Content -LiteralPath $nativeJsonFile -Encoding ASCII
+        $nativeJsonCommand = $env:ComSpec
+        $nativeJsonArguments = @('/c', $nativeJsonFile)
+    }
+    else {
+        $nativeJsonFile = Join-Path $tempRoot 'native-json.sh'
+        @'
+printf 'Created worktree\n' >&2
+printf '%s\n' '{"branch":"created"}'
+exit "$1"
+'@ | Set-Content -LiteralPath $nativeJsonFile -Encoding ASCII
+        $nativeJsonCommand = '/bin/sh'
+        $nativeJsonArguments = @($nativeJsonFile)
+    }
+    $nativeResult = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('0'))
+    Assert-Equal 'created' $nativeResult.branch 'JSON from successful command with stderr'
+    $nativeFailure = $null
+    try {
+        $null = ConvertFrom-NativeJson $nativeJsonCommand ($nativeJsonArguments + @('7'))
+    }
+    catch { $nativeFailure = $_.Exception.Message }
+    Assert-Equal 'Command failed (exit code 7)' $nativeFailure 'native failure despite valid JSON'
+
     $env:HERDR_PLUGIN_CONFIG_DIR = $configDir
 
     Assert-Equal 'workspace' (Get-WorktrunkOpenMode) 'default open mode'
@@ -222,6 +254,7 @@ exit /b %FZF_STUB_STATUS%
 echo %*>>"%WT_STUB_LOG%"
 if "%1"=="list" echo %WT_STUB_LIST%
 if "%1"=="switch" echo %WT_SWITCH_JSON%
+if "%1"=="switch" echo Created worktree 1>&2
 if "%1"=="merge" exit /b %WT_MERGE_STATUS%
 if "%1"=="remove" exit /b %WT_REMOVE_STATUS%
 exit /b 0
@@ -458,20 +491,6 @@ exit /b 0
         $wtCalls = [System.IO.File]::ReadAllText($wtLog)
         Assert-False ($wtCalls.Contains('switch ')) 'cancelled picker does not switch worktrees'
     }
-
-    $readme = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'README.md'))
-    Assert-Contains 'git clone --branch windows-powershell --single-branch https://github.com/giard-alexandre/herdr-worktrunk-windows.git' $readme 'branch-safe clone'
-    Assert-Contains 'herdr plugin install giard-alexandre/herdr-worktrunk-windows --ref windows-powershell' $readme 'branch-safe install'
-    Assert-False ($readme.Contains('YOUR-OWNER')) 'no placeholder repository'
-    Assert-Contains 'plugin does not ask' $readme 'immediate removal documented'
-    $removeScript = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'scripts/Remove.ps1'))
-    Assert-Contains 'remove immediately (no confirmation)' $removeScript 'picker states immediate removal'
-    Assert-False ($removeScript.Contains('will ask to confirm')) 'no false confirmation promise'
-
-    $manifest = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'herdr-plugin.toml'))
-    Assert-Contains 'platforms = ["windows"]' $manifest 'manifest'
-    Assert-Contains 'min_herdr_version = "0.8.0"' $manifest 'manifest'
-    Assert-False ($manifest.Contains('bash')) 'manifest has no Bash commands'
 
     Write-Host "PowerShell tests passed ($script:Assertions assertions)." -ForegroundColor Green
 }

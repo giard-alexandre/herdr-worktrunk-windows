@@ -36,8 +36,18 @@ function ConvertFrom-NativeJson {
         [string]$FailureMessage = 'Command failed'
     )
 
-    $output = @(& $FilePath @ArgumentList 2>$null)
-    $status = $LASTEXITCODE
+    # Windows PowerShell 5.1 turns redirected native stderr into ErrorRecords.
+    # Worktrunk writes success/progress there too; only its exit code signals
+    # failure. Limit the preference change to the native invocation.
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $FilePath @ArgumentList 2>$null)
+        $status = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
     if ($status -ne 0) {
         throw "$FailureMessage (exit code $status)"
     }
